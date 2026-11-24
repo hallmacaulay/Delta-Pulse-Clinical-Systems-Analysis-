@@ -433,16 +433,12 @@ def _process_single_patient(df: pd.DataFrame) -> pd.DataFrame:
         artifact_mask |= (df[col] - df[f"{col}_clean"]).abs() >= thresh
     df["artifact_suppressed"] = artifact_mask
 
-    # Stage 2: 240-Minute Self-Calibrating Personal Z-Score Baselines (with Std Floor)
+    # Stage 2: 240-Minute Self-Calibrating Personal Z-Score Baselines (with Lag & Std Floor)
     z_features = ["rr", "hr", "spo2", "sbp", "pulse_pressure", "etco2", "pip", "temp_gradient"]
     for col in z_features:
         clean_col = f"{col}_clean"
-
         ref_series = df[clean_col].shift(60).combine_first(df[clean_col])
-
         roll_mean = ref_series.rolling(window=240, min_periods=30).mean()
-
-
         roll_std = (
             ref_series
             .rolling(window=240, min_periods=30)
@@ -476,16 +472,16 @@ def _process_single_patient(df: pd.DataFrame) -> pd.DataFrame:
         (df["hr_zscore"] < -1.5)
     )
     df["low_pressure_leak_alert"] = (
-        (df["pip_zscore"] <= -2.2) &
-        (df["dPIP_dt_30m"] <= -3.0)
+        (df["pip_zscore"] <= -2.5) &
+        ((df["pip_clean"] - df["pip_base_mean"]) <= -3.0)
     )
     df["secretion_burden_alert"] = (
-        (df["pip_zscore"] >= 2.2) &
-        (df["spo2_zscore"] <= -2.0)
+        ((df["pip_zscore"] >= 2.8) & (df["spo2_zscore"] <= -2.5) & (df["dPIP_dt_30m"] >= 1.5)) |
+        ((df["pip_zscore"] >= 3.5) & (df["spo2_zscore"] <= -3.0))
     )
     df["silent_hypovent_alert"] = (
-        (df["etco2_zscore"] >= 2.2) &
-        (df["rr_zscore"] <= -1.8)
+        ((df["etco2_zscore"] >= 2.8) & (df["rr_zscore"] <= -2.2) & (df["dEtCO2_dt_30m"] >= 1.5)) |
+        ((df["etco2_zscore"] >= 3.5) & (df["rr_zscore"] <= -2.5))
     )
     df["pre_ehr_alert"] = (
         df["core_velocity_alert"] |
@@ -697,7 +693,6 @@ def run_deltapulse_velocity_engine(db_path: str = DB_NAME, patient_id: str | Non
     return cohort_df
 
 
-
 if __name__ == "__main__":
     print("Running DeltaPulse 12-Bed ICU Pod End-to-End Verification...")
     generate_synthetic_telemetry(DB_NAME)
@@ -720,11 +715,9 @@ if __name__ == "__main__":
             status = f"0% FP across 6h | {suppressed} artifact mins suppressed"
         else:
             assert base_fp == 0, f"[FAIL] {pid} triggered {base_fp} baseline false alerts"
-
             assert m305_alert, f"[FAIL] {pid} ({meta['crash_type']}) did not trigger by m305"
             assert m359_alert, f"[FAIL] {pid} ({meta['crash_type']}) dropped out by m359"
             ctx = evaluate_bedside_context(p_df.iloc[305])
-
             status = f"0 baseline FP | m305–m359 LATCHED: {ctx[0]['title']}"
 
         print(f"  - {meta['bed']} ({pid}): {status}")
