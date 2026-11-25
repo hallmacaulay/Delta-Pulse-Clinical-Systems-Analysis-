@@ -5,6 +5,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List
 
 DB_NAME = "aeropulse_vitals.db"
+SHIFT_MINUTES = 1440       # Full 24-hour cycle (07:00 AM - 06:59 AM)
+CRASH_START_MIN = 1320     # 05:00 AM (22h into 24h cycle; 2h ramp to 06:59 AM)
+CHECKPOINT_LATE_MIN = 1385 # 06:05 AM (65 mins into ramp)
 
 # Minimum rolling std floors prevent division-by-zero or Z-score explosions
 # on flat-line windows without blunting true physiological shifts.
@@ -47,6 +50,7 @@ ARTIFACT_TAGS: Dict[str, List[str]] = {
 }
 
 # 12-Bed ICU Pod (7 Active Deterioration Archetypes + 5 Tricky-Baseline Stable Controls)
+# Artifacts span both 12h Day Shift (m0-m719: 07:00-18:59) and 12h Night Shift (m720-m1439: 19:00-06:59)
 PATIENT_PROFILES = {
     "VENT-01": {
         "bed": "Bed 01",
@@ -58,15 +62,15 @@ PATIENT_PROFILES = {
         "line_status": "20G PIV (R Forearm): Patent | Inline Trach Suction & Heated Circuit (Compatible)",
         "clinical_note": (
             "Chronically elevated baseline (RR ~22 bpm, EtCO2 ~52 mmHg, SpO2 ~90.5%). "
-            "Triggers continuous false alarms on static NEWS2 monitors. Simulates inline "
-            "suctioning at 01:00 AM (m120), followed by mucus plugging & sepsis after 03:00 AM (m240)."
+            "Triggers continuous false alarms on static NEWS2 monitors. Simulates Day/Night inline "
+            "suctioning artifacts, pre-breakout autonomic coil (04:30 AM), followed by mucus plugging & sepsis after 05:00 AM (m1320)."
         ),
         "baseline": {
             "rr": (22.0, 0.7), "hr": (86.0, 1.8), "spo2": (90.5, 0.5),
             "sbp": (122.0, 2.0), "dbp": (78.0, 1.5), "uo": (45.0, 3.0),
             "etco2": (52.0, 0.9), "pip": (24.0, 0.9), "temp_grad": (1.8, 0.12)
         },
-        "artifacts": [120, 195],
+        "artifacts": [120, 480, 960, 1180],
         "crash_type": "mucus_sepsis"
     },
     "VENT-02": {
@@ -79,15 +83,15 @@ PATIENT_PROFILES = {
         "line_status": "Radial ART Line: Optimal Trace | Foley Catheter: Check Dependent Loop (AD Trigger Risk)",
         "clinical_note": (
             "Neurogenic baseline hypotension (BP ~94/60 mmHg) and bradycardia (HR ~56 bpm). "
-            "Simulates turning artifact at 12:50 AM (m110), followed by acute Autonomic "
-            "Dysreflexia (BP surge to ~130/72 mmHg + reflex bradycardia) & airway strain after 03:00 AM."
+            "Simulates turning artifacts across Day/Night shifts, followed by acute Autonomic "
+            "Dysreflexia (BP surge + reflex bradycardia) & airway strain after 05:00 AM (m1320)."
         ),
         "baseline": {
             "rr": (14.5, 0.5), "hr": (56.0, 1.4), "spo2": (97.0, 0.4),
             "sbp": (94.0, 1.8), "dbp": (60.0, 1.2), "uo": (52.0, 3.5),
             "etco2": (39.0, 0.7), "pip": (18.0, 0.7), "temp_grad": (1.5, 0.10)
         },
-        "artifacts": [110, 185],
+        "artifacts": [110, 450, 920, 1150],
         "crash_type": "autonomic_dysreflexia"
     },
     "VENT-03": {
@@ -99,15 +103,15 @@ PATIENT_PROFILES = {
         "vent_mode": "PSV 12 / PEEP 6 | FiO2 30%",
         "line_status": "Radial ART Line: Mild Positional Dampening (Flushed Q2h) | 20G PIV x2: K+ Rider Running",
         "clinical_note": (
-            "Stable baseline during initial night shift support, with suction spike at 01:10 AM (m130), "
-            "followed by progressive diaphragmatic fatigue and rapid shallow breathing creep after 03:00 AM."
+            "Stable baseline during Day and early Night support, with suction spikes, "
+            "followed by progressive diaphragmatic fatigue and rapid shallow breathing creep after 05:00 AM."
         ),
         "baseline": {
             "rr": (16.0, 0.6), "hr": (78.0, 1.6), "spo2": (95.5, 0.4),
             "sbp": (116.0, 1.9), "dbp": (74.0, 1.4), "uo": (48.0, 2.8),
             "etco2": (41.0, 0.8), "pip": (17.0, 0.6), "temp_grad": (1.6, 0.11)
         },
-        "artifacts": [130],
+        "artifacts": [130, 540, 1020],
         "crash_type": "weaning_fatigue"
     },
     "VENT-04": {
@@ -119,8 +123,8 @@ PATIENT_PROFILES = {
         "vent_mode": "AC/PC | PIP 20 | PEEP 6 | FiO2 25%",
         "line_status": "Non-Invasive Cuff Cycling Q15m | PEG Tube: Nocturnal Feeds at 55 mL/hr",
         "clinical_note": (
-            "Stable 6-hour control patient undergoing routine inline suctioning, coughing, "
-            "repositioning (m90, m150, m290), and a brief circuit-open low-pressure dip (m220). "
+            "Stable 24-hour control patient undergoing routine inline suctioning, coughing, "
+            "repositioning, and a brief circuit-open low-pressure dip (m220). "
             "Demonstrates bidirectional Stage 1 noise suppression with 0% false-positive alarms."
         ),
         "baseline": {
@@ -128,7 +132,7 @@ PATIENT_PROFILES = {
             "sbp": (120.0, 1.8), "dbp": (76.0, 1.3), "uo": (50.0, 3.0),
             "etco2": (40.0, 0.7), "pip": (20.0, 0.7), "temp_grad": (1.7, 0.10)
         },
-        "artifacts": [90, 150, 220, 290],
+        "artifacts": [90, 220, 510, 880, 1210],
         "crash_type": "none"
     },
     "VENT-05": {
@@ -148,7 +152,7 @@ PATIENT_PROFILES = {
             "sbp": (124.0, 1.8), "dbp": (76.0, 1.2), "uo": (50.0, 3.0),
             "etco2": (40.0, 0.7), "pip": (18.0, 0.6), "temp_grad": (1.5, 0.10)
         },
-        "artifacts": [105, 190],
+        "artifacts": [105, 490, 950],
         "crash_type": "silent_hypovent"
     },
     "VENT-06": {
@@ -160,15 +164,15 @@ PATIENT_PROFILES = {
         "vent_mode": "AC/VC | TV 420 | PEEP 10 | FiO2 40%",
         "line_status": "L PICC (Double Lumen): Abx Infusing | Heated Wire Circuit & Subglottic Trach",
         "clinical_note": (
-            "Simulates a gradual trach cuff deflation / heated circuit leak after 03:00 AM, "
-            "producing a sustained PIP drop and negative 30m pressure velocity beyond transient blips."
+            "Simulates a gradual trach cuff deflation / heated circuit leak after 05:00 AM, "
+            "producing a sustained PIP drop beyond transient blips."
         ),
         "baseline": {
             "rr": (16.5, 0.5), "hr": (80.0, 1.5), "spo2": (96.0, 0.4),
             "sbp": (118.0, 1.8), "dbp": (74.0, 1.3), "uo": (46.0, 2.8),
             "etco2": (41.0, 0.7), "pip": (22.0, 0.7), "temp_grad": (1.6, 0.10)
         },
-        "artifacts": [140],
+        "artifacts": [140, 600, 1040],
         "crash_type": "circuit_leak"
     },
     "VENT-07": {
@@ -180,15 +184,15 @@ PATIENT_PROFILES = {
         "vent_mode": "AC/PC | PIP 19 | PEEP 6 | FiO2 35%",
         "line_status": "R IJ Triple-Lumen CVC (Pressor Dedicated) | Foley with Urometer",
         "clinical_note": (
-            "Simulates early septic decompensation ('slow boil'): rising RR and HR, narrowing "
-            "pulse pressure, widening Core-Periph Temp gradient, and falling hourly urine output."
+            "Simulates early septic decompensation ('slow boil'): pre-breakout autonomic coil (04:30 AM), "
+            "followed by rising RR and HR, narrowing pulse pressure, widening Core-Periph Temp gradient, and oliguria."
         ),
         "baseline": {
             "rr": (17.0, 0.5), "hr": (82.0, 1.5), "spo2": (96.0, 0.4),
             "sbp": (114.0, 1.8), "dbp": (68.0, 1.3), "uo": (42.0, 2.5),
             "etco2": (36.0, 0.7), "pip": (19.0, 0.6), "temp_grad": (1.9, 0.11)
         },
-        "artifacts": [115, 205],
+        "artifacts": [115, 520, 990],
         "crash_type": "septic_shock_drift"
     },
     "VENT-08": {
@@ -200,7 +204,7 @@ PATIENT_PROFILES = {
         "vent_mode": "AC/VC | TV 440 | PEEP 5 | FiO2 45%",
         "line_status": "18G PIV x2: MgSO4 & Steroids | Inline Aerogen Nebulizer Active",
         "clinical_note": (
-            "Simulates worsening bronchospasm and thick secretion plugging after 03:00 AM: "
+            "Simulates worsening bronchospasm and thick secretion plugging after 05:00 AM: "
             "sustained PIP climb paired with progressive SpO2 erosion and compensatory tachycardia."
         ),
         "baseline": {
@@ -208,7 +212,7 @@ PATIENT_PROFILES = {
             "sbp": (118.0, 1.8), "dbp": (75.0, 1.2), "uo": (55.0, 3.0),
             "etco2": (38.0, 0.7), "pip": (23.0, 0.8), "temp_grad": (1.5, 0.10)
         },
-        "artifacts": [85, 160],
+        "artifacts": [85, 430, 910],
         "crash_type": "bronchospasm"
     },
     "VENT-09": {
@@ -221,14 +225,14 @@ PATIENT_PROFILES = {
         "line_status": "L Radial ART Line | R IJ Cordis | Mediastinal & Pleural Chest Tubes (<40 mL/h)",
         "clinical_note": (
             "Stable cardiac surgical recovery control experiencing brief coughing and turning "
-            "artifacts (m95, m175, m265) as sedation lightens — demonstrates calm false-alarm suppression."
+            "artifacts across 24 hours — demonstrates calm false-alarm suppression."
         ),
         "baseline": {
             "rr": (15.5, 0.5), "hr": (78.0, 1.5), "spo2": (97.5, 0.4),
             "sbp": (118.0, 1.9), "dbp": (66.0, 1.3), "uo": (60.0, 3.5),
             "etco2": (38.0, 0.7), "pip": (17.5, 0.6), "temp_grad": (1.5, 0.10)
         },
-        "artifacts": [95, 175, 265],
+        "artifacts": [95, 460, 890, 1240],
         "crash_type": "none"
     },
     "VENT-10": {
@@ -248,7 +252,7 @@ PATIENT_PROFILES = {
             "sbp": (116.0, 1.8), "dbp": (72.0, 1.3), "uo": (75.0, 4.0),
             "etco2": (28.0, 0.7), "pip": (12.0, 0.5), "temp_grad": (1.4, 0.09)
         },
-        "artifacts": [100, 190, 270],
+        "artifacts": [100, 500, 940, 1270],
         "crash_type": "none"
     },
     "VENT-11": {
@@ -261,14 +265,14 @@ PATIENT_PROFILES = {
         "line_status": "EVD Draining Clear CSF | Radial ART Line Leveled to Tragus | 3% NaCl Hold",
         "clinical_note": (
             "Stable neuro-protective ventilation control undergoing Q1h neuro checks, oral care, "
-            "and suctioning blips (m80, m145, m230, m300) without sustained intracranial or airway drift."
+            "and suctioning blips across 24 hours without sustained intracranial or airway drift."
         ),
         "baseline": {
             "rr": (16.0, 0.5), "hr": (68.0, 1.4), "spo2": (98.0, 0.4),
             "sbp": (132.0, 2.0), "dbp": (74.0, 1.4), "uo": (55.0, 3.0),
             "etco2": (36.5, 0.6), "pip": (19.5, 0.6), "temp_grad": (1.4, 0.09)
         },
-        "artifacts": [80, 145, 230, 300],
+        "artifacts": [80, 420, 860, 1200],
         "crash_type": "none"
     },
     "VENT-12": {
@@ -281,21 +285,22 @@ PATIENT_PROFILES = {
         "line_status": "L Forearm 20G PIV (Lasix Drip 10 mg/hr) | Foley Catheter (Strict I&O)",
         "clinical_note": (
             "Chronic low-normal systolic BP (~98 mmHg) and faster AFib baseline HR (~90 bpm) "
-            "that constantly trip static SBP < 100 alarms on legacy monitors; stable throughout shift."
+            "that constantly trip static SBP < 100 alarms on legacy monitors; stable throughout 24h."
         ),
         "baseline": {
             "rr": (17.5, 0.5), "hr": (90.0, 2.0), "spo2": (95.0, 0.4),
             "sbp": (98.0, 1.8), "dbp": (62.0, 1.2), "uo": (85.0, 4.5),
             "etco2": (37.0, 0.7), "pip": (16.5, 0.6), "temp_grad": (1.8, 0.10)
         },
-        "artifacts": [115, 210, 280],
+        "artifacts": [115, 530, 970, 1280],
         "crash_type": "none"
     }
 }
 
 
-def generate_synthetic_telemetry(db_path: str = DB_NAME, minutes: int = 360) -> pd.DataFrame:
-    start_time = datetime(2026, 11, 10, 23, 0, 0)
+def generate_synthetic_telemetry(db_path: str = DB_NAME, minutes: int = SHIFT_MINUTES) -> pd.DataFrame:
+    # Full 24h cycle starting at 07:00 AM (12h Day Shift -> 07:00 PM -> 12h Night Shift -> 06:59 AM)
+    start_time = datetime(2026, 11, 10, 7, 0, 0)
     timestamps = [start_time + timedelta(minutes=i) for i in range(minutes)]
     all_dfs = []
 
@@ -314,84 +319,90 @@ def generate_synthetic_telemetry(db_path: str = DB_NAME, minutes: int = 360) -> 
         temp_grad = np.random.normal(*b["temp_grad"], size=minutes)
 
         for idx in meta["artifacts"]:
+            if idx >= minutes - 2:
+                continue
             if pid == "VENT-04" and idx == 220:
-                # Brief downward circuit-opening / low-pressure blip (1 min -> suppressed)
                 pip[idx] -= 10.5
                 rr[idx] -= 6.5
             else:
-                # Brief upward suctioning / coughing / turning spike (2 min -> suppressed)
                 rr[idx:idx + 2] += 11.5
                 hr[idx:idx + 2] += 18.0
                 pip[idx:idx + 2] += 14.5
                 spo2[idx:idx + 2] -= 5.0
 
-        w = minutes - 240
+        c_start = CRASH_START_MIN
+        w = minutes - c_start
         crash = meta["crash_type"]
 
+        # Pre-breakout autonomic variability compression ("Physiological Squeeze" coil)
+        # 30 minutes prior to mean vital drift on early sepsis/plugging archetypes (m1290-m1319 = 04:30-04:59 AM)
+        if crash in ("mucus_sepsis", "septic_shock_drift"):
+            coil_s, coil_e = c_start - 30, c_start
+            rr[coil_s:coil_e] = np.random.normal(b["rr"][0], 0.11, size=30)
+            hr[coil_s:coil_e] = np.random.normal(b["hr"][0], 0.28, size=30)
+            sbp[coil_s:coil_e] = np.random.normal(b["sbp"][0], 0.30, size=30)
+            dbp[coil_s:coil_e] = np.random.normal(b["dbp"][0], 0.22, size=30)
+
         if crash == "mucus_sepsis":
-            rr[240:] += np.linspace(0, 8.5, w)
-            hr[240:] += np.linspace(0, 22.0, w)
-            spo2[240:] -= np.linspace(0, 4.5, w)
-            sbp[240:] -= np.linspace(0, 6.0, w)
-            dbp[240:] += np.linspace(0, 9.5, w)
-            uo[240:] -= np.linspace(0, 25.0, w)
-            etco2[240:] += np.linspace(0, 9.5, w)
-            pip[240:] += np.linspace(0, 10.5, w)
-            temp_grad[240:] += np.linspace(0, 2.1, w)
+            rr[c_start:] += np.linspace(0, 8.5, w)
+            hr[c_start:] += np.linspace(0, 22.0, w)
+            spo2[c_start:] -= np.linspace(0, 4.5, w)
+            sbp[c_start:] -= np.linspace(0, 6.0, w)
+            dbp[c_start:] += np.linspace(0, 9.5, w)
+            uo[c_start:] -= np.linspace(0, 25.0, w)
+            etco2[c_start:] += np.linspace(0, 9.5, w)
+            pip[c_start:] += np.linspace(0, 10.5, w)
+            temp_grad[c_start:] += np.linspace(0, 2.1, w)
 
         elif crash == "autonomic_dysreflexia":
-            rr[240:] += np.linspace(0, 8.0, w)
-            hr[240:] -= np.linspace(0, 10.5, w)
-            spo2[240:] -= np.linspace(0, 3.5, w)
-            sbp[240:] += np.linspace(0, 36.0, w)
-            dbp[240:] += np.linspace(0, 12.0, w)
-            uo[240:] -= np.linspace(0, 22.0, w)
-            etco2[240:] += np.linspace(0, 8.5, w)
-            pip[240:] += np.linspace(0, 10.0, w)
-            temp_grad[240:] += np.linspace(0, 1.9, w)
+            rr[c_start:] += np.linspace(0, 8.0, w)
+            hr[c_start:] -= np.linspace(0, 10.5, w)
+            spo2[c_start:] -= np.linspace(0, 3.5, w)
+            sbp[c_start:] += np.linspace(0, 36.0, w)
+            dbp[c_start:] += np.linspace(0, 12.0, w)
+            uo[c_start:] -= np.linspace(0, 22.0, w)
+            etco2[c_start:] += np.linspace(0, 8.5, w)
+            pip[c_start:] += np.linspace(0, 10.0, w)
+            temp_grad[c_start:] += np.linspace(0, 1.9, w)
 
         elif crash == "weaning_fatigue":
-            rr[240:] += np.linspace(0, 11.0, w)
-            hr[240:] += np.linspace(0, 20.0, w)
-            spo2[240:] -= np.linspace(0, 4.0, w)
-            sbp[240:] -= np.linspace(0, 4.0, w)
-            dbp[240:] += np.linspace(0, 9.0, w)
-            uo[240:] -= np.linspace(0, 18.0, w)
-            etco2[240:] += np.linspace(0, 10.0, w)
-            pip[240:] += np.linspace(0, 7.5, w)
-            temp_grad[240:] += np.linspace(0, 1.7, w)
+            rr[c_start:] += np.linspace(0, 11.0, w)
+            hr[c_start:] += np.linspace(0, 20.0, w)
+            spo2[c_start:] -= np.linspace(0, 4.0, w)
+            sbp[c_start:] -= np.linspace(0, 4.0, w)
+            dbp[c_start:] += np.linspace(0, 9.0, w)
+            uo[c_start:] -= np.linspace(0, 18.0, w)
+            etco2[c_start:] += np.linspace(0, 10.0, w)
+            pip[c_start:] += np.linspace(0, 7.5, w)
+            temp_grad[c_start:] += np.linspace(0, 1.7, w)
 
         elif crash == "silent_hypovent":
-            # Opioid CO2 narcosis: RR drops, EtCO2 climbs, SpO2 remains deceptively steady
-            rr[240:] -= np.linspace(0, 6.5, w)
-            etco2[240:] += np.linspace(0, 16.0, w)
-            hr[240:] -= np.linspace(0, 5.0, w)
-            spo2[240:] -= np.linspace(0, 0.5, w)
+            rr[c_start:] -= np.linspace(0, 6.5, w)
+            etco2[c_start:] += np.linspace(0, 16.0, w)
+            hr[c_start:] -= np.linspace(0, 5.0, w)
+            spo2[c_start:] -= np.linspace(0, 0.5, w)
 
         elif crash == "circuit_leak":
-            # Cuff deflation / circuit leak: sustained PIP drop & negative 30m velocity
-            pip[240:] -= np.linspace(0, 14.0, w)
-            rr[240:] += np.linspace(0, 5.0, w)
-            spo2[240:] -= np.linspace(0, 2.5, w)
-            hr[240:] += np.linspace(0, 10.0, w)
+            pip[c_start:] -= np.linspace(0, 14.0, w)
+            rr[c_start:] += np.linspace(0, 5.0, w)
+            spo2[c_start:] -= np.linspace(0, 2.5, w)
+            hr[c_start:] += np.linspace(0, 10.0, w)
 
         elif crash == "septic_shock_drift":
-            # Early urosepsis decompensation: tachypnea, tachycardia, narrowing PP, oliguria
-            rr[240:] += np.linspace(0, 11.5, w)
-            hr[240:] += np.linspace(0, 26.0, w)
-            sbp[240:] -= np.linspace(0, 14.0, w)
-            dbp[240:] += np.linspace(0, 4.0, w)
-            uo[240:] -= np.linspace(0, 28.0, w)
-            temp_grad[240:] += np.linspace(0, 2.2, w)
-            spo2[240:] -= np.linspace(0, 2.0, w)
+            rr[c_start:] += np.linspace(0, 11.5, w)
+            hr[c_start:] += np.linspace(0, 26.0, w)
+            sbp[c_start:] -= np.linspace(0, 14.0, w)
+            dbp[c_start:] += np.linspace(0, 4.0, w)
+            uo[c_start:] -= np.linspace(0, 28.0, w)
+            temp_grad[c_start:] += np.linspace(0, 2.2, w)
+            spo2[c_start:] -= np.linspace(0, 2.0, w)
 
         elif crash == "bronchospasm":
-            # Status asthmaticus / secretion plugging: rising PIP + falling SpO2 + tachycardia
-            pip[240:] += np.linspace(0, 13.0, w)
-            spo2[240:] -= np.linspace(0, 6.5, w)
-            hr[240:] += np.linspace(0, 22.0, w)
-            rr[240:] += np.linspace(0, 7.0, w)
-            etco2[240:] += np.linspace(0, 5.0, w)
+            pip[c_start:] += np.linspace(0, 13.0, w)
+            spo2[c_start:] -= np.linspace(0, 6.5, w)
+            hr[c_start:] += np.linspace(0, 22.0, w)
+            rr[c_start:] += np.linspace(0, 7.0, w)
+            etco2[c_start:] += np.linspace(0, 5.0, w)
 
         p_df = pd.DataFrame({
             "patient_id": pid,
@@ -417,6 +428,43 @@ def generate_synthetic_telemetry(db_path: str = DB_NAME, minutes: int = 360) -> 
     return full_df
 
 
+def compute_physiological_squeeze(df: pd.DataFrame, short_win: int = 15, base_win: int = 120) -> pd.DataFrame:
+    """
+    TradingView TTM-Squeeze-inspired 'Physiological Squeeze' detector:
+    Flags abnormal loss of healthy autonomic micro-variability across >=2 linked
+    channels before mean vital signs drift out of baseline.
+    """
+    channels = {
+        "rr": ("rr_clean", 0.22),
+        "pp": ("pulse_pressure_clean", 0.75),
+        "hr": ("hr_clean", 0.65),
+    }
+
+    squeeze_flags = []
+    for key, (col, floor) in channels.items():
+        short_std = df[col].rolling(window=short_win, min_periods=10).std().fillna(floor)
+        base_std = (
+            df[col].shift(30).combine_first(df[col])
+            .rolling(window=base_win, min_periods=30)
+            .std()
+            .clip(lower=floor)
+            .fillna(floor)
+        )
+        ratio = np.round(short_std / base_std, 2)
+        df[f"{key}_squeeze_ratio"] = ratio
+        squeeze_flags.append(ratio < 0.45)
+
+    active_squeezes = sum(f.astype(int) for f in squeeze_flags)
+    raw_squeeze = active_squeezes >= 2
+
+    df["phys_squeeze_active"] = raw_squeeze.rolling(window=3, min_periods=3).sum().fillna(0).eq(3)
+    df["phys_squeeze_score"] = np.round(
+        (1.0 - np.minimum(df[["rr_squeeze_ratio", "pp_squeeze_ratio", "hr_squeeze_ratio"]].mean(axis=1), 1.0)) * 100.0,
+        1
+    )
+    return df
+
+
 def _process_single_patient(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values("minute_index").reset_index(drop=True)
 
@@ -432,6 +480,9 @@ def _process_single_patient(df: pd.DataFrame) -> pd.DataFrame:
     for col, thresh in ARTIFACT_SPIKE_THRESHOLD.items():
         artifact_mask |= (df[col] - df[f"{col}_clean"]).abs() >= thresh
     df["artifact_suppressed"] = artifact_mask
+
+    # Stage 1B: Physiological Squeeze (Autonomic Variability Compression Detector)
+    df = compute_physiological_squeeze(df)
 
     # Stage 2: 240-Minute Self-Calibrating Personal Z-Score Baselines (with Lag & Std Floor)
     z_features = ["rr", "hr", "spo2", "sbp", "pulse_pressure", "etco2", "pip", "temp_gradient"]
@@ -483,7 +534,7 @@ def _process_single_patient(df: pd.DataFrame) -> pd.DataFrame:
         ((df["etco2_zscore"] >= 2.8) & (df["rr_zscore"] <= -2.2) & (df["dEtCO2_dt_30m"] >= 1.5)) |
         ((df["etco2_zscore"] >= 3.5) & (df["rr_zscore"] <= -2.5))
     )
-    df["pre_ehr_alert"] = (
+    raw_pre_alert = (
         df["core_velocity_alert"] |
         df["vent_mechanics_alert"] |
         df["autonomic_dysreflexia_alert"] |
@@ -491,6 +542,8 @@ def _process_single_patient(df: pd.DataFrame) -> pd.DataFrame:
         df["secretion_burden_alert"] |
         df["silent_hypovent_alert"]
     )
+    # 3-minute consecutive persistence latch suppresses isolated 1-2 min Gaussian coincidences across 24h
+    df["pre_ehr_alert"] = raw_pre_alert.rolling(window=3, min_periods=3).sum().fillna(0).eq(3)
     df["legacy_static_alert"] = (
         (df["rr"] > 20.5) |
         (df["spo2"] < 92.0) |
@@ -501,10 +554,6 @@ def _process_single_patient(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def evaluate_bedside_context(row: pd.Series) -> List[Dict]:
-    """
-    Translates active co-moving rule flags at a single shift minute into
-    plain-language signal stories and 3 assessment-first bedside checks.
-    """
     alerts: List[Dict] = []
 
     if bool(row.get("autonomic_dysreflexia_alert", False)):
@@ -601,6 +650,22 @@ def evaluate_bedside_context(row: pd.Series) -> List[Dict]:
             ],
         })
 
+    if bool(row.get("phys_squeeze_active", False)) and not bool(row.get("pre_ehr_alert", False)):
+        alerts.append({
+            "severity": "WATCH",
+            "title": "Physiological Squeeze Detected (Autonomic Variability Compression)",
+            "signal_read": (
+                f"Micro-variability compressed to `{row['phys_squeeze_score']}%` Squeeze Index "
+                f"(RR ratio `{row['rr_squeeze_ratio']}`, PP ratio `{row['pp_squeeze_ratio']}`, "
+                f"HR ratio `{row['hr_squeeze_ratio']}`) while mean vitals still appear flat."
+            ),
+            "bedside_cues": [
+                "Reassess patient early: check mental status, skin perfusion, and work of breathing before vitals shift.",
+                "Audit recent sedation/analgesia, ventilator synchrony, and Foley/line patency.",
+                "Monitor closely over the next 30–60 minutes for directional velocity breakout.",
+            ],
+        })
+
     return alerts
 
 
@@ -609,14 +674,9 @@ def build_shift_event_strip(
     selected_min: int,
     manual_tags: List[Dict],
 ) -> pd.DataFrame:
-    """
-    Builds a chronological 'What Just Happened' memory-offloading strip up to
-    selected_min, combining Stage 1 suppressed artifacts, alert onset, and manual care tags.
-    """
     upto_df = df.iloc[:selected_min + 1]
     records: List[Dict] = []
 
-    # 1. Stage 1 Auto-Suppressed Artifacts
     art_rows = upto_df[upto_df["artifact_suppressed"]]
     for _, r in art_rows.iterrows():
         diffs = []
@@ -633,7 +693,17 @@ def build_shift_event_strip(
             "Detail": ", ".join(diffs) if diffs else "Transient raw noise damped",
         })
 
-    # 2. First Pre-EHR Alert Onset (if active in window)
+    squeeze_rows = upto_df[upto_df["phys_squeeze_active"]]
+    if not squeeze_rows.empty:
+        first_sq = squeeze_rows.iloc[0]
+        records.append({
+            "minute_index": int(first_sq["minute_index"]),
+            "Time": first_sq["timestamp"].strftime("%I:%M %p"),
+            "Type": "Physiological Squeeze",
+            "Event": "Autonomic Variability Coil Detected",
+            "Detail": f"Squeeze Index {first_sq['phys_squeeze_score']}% at minute {int(first_sq['minute_index'])}",
+        })
+
     alert_rows = upto_df[upto_df["pre_ehr_alert"]]
     if not alert_rows.empty:
         first_alert = alert_rows.iloc[0]
@@ -647,13 +717,12 @@ def build_shift_event_strip(
             "Detail": f"First sustained breach at minute {int(first_alert['minute_index'])}",
         })
 
-    # 3. Manual Bedside Care Tags
     for tag in manual_tags:
         if int(tag["minute_index"]) <= selected_min:
             records.append({
                 "minute_index": int(tag["minute_index"]),
                 "Time": tag["time_str"],
-                "Type": "Bedside Care Tag",
+                "Type": tag.get("type", "Bedside Care Tag"),
                 "Event": tag["label"],
                 "Detail": tag["detail"],
             })
@@ -667,13 +736,13 @@ def build_shift_event_strip(
 
 def run_deltapulse_velocity_engine(db_path: str = DB_NAME, patient_id: str | None = None) -> pd.DataFrame:
     expected_pids = set(PATIENT_PROFILES.keys())
-    expected_rows = len(PATIENT_PROFILES) * 360
+    expected_rows = len(PATIENT_PROFILES) * SHIFT_MINUTES
     try:
         with sqlite3.connect(db_path) as conn:
             raw_df = pd.read_sql("SELECT * FROM vitals_stream", conn)
         has_all_beds = (
             "patient_id" in raw_df.columns
-            and len(raw_df) >= expected_rows
+            and len(raw_df) == expected_rows
             and expected_pids.issubset(set(raw_df["patient_id"].unique()))
         )
         if not has_all_beds:
@@ -694,32 +763,33 @@ def run_deltapulse_velocity_engine(db_path: str = DB_NAME, patient_id: str | Non
 
 
 if __name__ == "__main__":
-    print("Running DeltaPulse 12-Bed ICU Pod End-to-End Verification...")
+    print("Running DeltaPulse V3 12-Bed 24-Hour ICU Pod End-to-End Verification...")
     generate_synthetic_telemetry(DB_NAME)
     cohort = run_deltapulse_velocity_engine(DB_NAME, patient_id=None)
 
-    assert len(cohort) == len(PATIENT_PROFILES) * 360, f"Unexpected row count: {len(cohort)}"
-    print(f"[PASS] Loaded {len(cohort)} patient-minutes across {cohort['patient_id'].nunique()} beds.")
+    assert len(cohort) == len(PATIENT_PROFILES) * SHIFT_MINUTES, f"Unexpected row count: {len(cohort)}"
+    print(f"[PASS] Loaded {len(cohort)} patient-minutes (24h Day+Night) across {cohort['patient_id'].nunique()} beds.")
 
     for pid, meta in PATIENT_PROFILES.items():
         p_df = cohort[cohort["patient_id"] == pid].reset_index(drop=True)
-        base_fp = int(p_df.iloc[:240]["pre_ehr_alert"].sum())
+        base_fp = int(p_df.iloc[:CRASH_START_MIN]["pre_ehr_alert"].sum())
         suppressed = int(p_df["artifact_suppressed"].sum())
+        squeeze_mins = int(p_df["phys_squeeze_active"].sum())
 
-        m305_alert = bool(p_df.iloc[305]["pre_ehr_alert"])
-        m359_alert = bool(p_df.iloc[359]["pre_ehr_alert"])
+        m_late_alert = bool(p_df.iloc[CHECKPOINT_LATE_MIN]["pre_ehr_alert"])
+        m_end_alert = bool(p_df.iloc[SHIFT_MINUTES - 1]["pre_ehr_alert"])
 
         if meta["crash_type"] == "none":
             full_fp = int(p_df["pre_ehr_alert"].sum())
             assert full_fp == 0, f"[FAIL] Stable control {pid} triggered {full_fp} false alerts"
-            status = f"0% FP across 6h | {suppressed} artifact mins suppressed"
+            status = f"0% FP across 24h | {suppressed} artifact mins suppressed | squeeze mins={squeeze_mins}"
         else:
             assert base_fp == 0, f"[FAIL] {pid} triggered {base_fp} baseline false alerts"
-            assert m305_alert, f"[FAIL] {pid} ({meta['crash_type']}) did not trigger by m305"
-            assert m359_alert, f"[FAIL] {pid} ({meta['crash_type']}) dropped out by m359"
-            ctx = evaluate_bedside_context(p_df.iloc[305])
-            status = f"0 baseline FP | m305–m359 LATCHED: {ctx[0]['title']}"
+            assert m_late_alert, f"[FAIL] {pid} ({meta['crash_type']}) did not trigger by m{CHECKPOINT_LATE_MIN}"
+            assert m_end_alert, f"[FAIL] {pid} ({meta['crash_type']}) dropped out by m{SHIFT_MINUTES - 1}"
+            ctx = evaluate_bedside_context(p_df.iloc[CHECKPOINT_LATE_MIN])
+            status = f"0 baseline FP (22h) | m{CHECKPOINT_LATE_MIN}–m{SHIFT_MINUTES - 1} LATCHED: {ctx[0]['title']} | squeeze mins={squeeze_mins}"
 
         print(f"  - {meta['bed']} ({pid}): {status}")
 
-    print("[PASS] All 12 ICU beds passed deterministic signal, artifact, and co-moving rule validation.")
+    print("[PASS] All 12 ICU beds passed V3 24-hour deterministic signal, squeeze, artifact, and co-moving rule validation.")

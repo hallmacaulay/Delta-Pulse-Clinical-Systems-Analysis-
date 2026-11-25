@@ -13,12 +13,21 @@ try:
 except ImportError:
     HAS_LIGHTGBM = False
 
+from database_and_engine import CHECKPOINT_LATE_MIN
 from ml_classifier import (
     FEATURE_COLUMNS,
     CLINICAL_FEATURE_LABELS,
     prepare_training_cohort,
-    explain_minute_prediction
+    explain_minute_prediction,
+    forecast_regression_trajectory
 )
+
+TOUCH_CHART_CONFIG = {
+    "scrollZoom": True,
+    "displayModeBar": True,
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "zoom2d"]
+}
 
 
 def build_benchmark_models() -> dict:
@@ -83,7 +92,7 @@ def run_multi_model_benchmark(cohort_df: pd.DataFrame) -> tuple[pd.DataFrame, pd
 
         v1_slice = cohort_df[cohort_df["patient_id"] == "VENT-01"]
         suction_prob = v1_slice.loc[v1_slice["minute_index"].isin([120, 121]), col_name].max()
-        crash_prob = v1_slice.loc[v1_slice["minute_index"] == 305, col_name].values[0]
+        crash_prob = v1_slice.loc[v1_slice["minute_index"] == CHECKPOINT_LATE_MIN, col_name].values[0]
 
         benchmark_rows.append({
             "Model Architecture": name,
@@ -92,8 +101,8 @@ def run_multi_model_benchmark(cohort_df: pd.DataFrame) -> tuple[pd.DataFrame, pd
             "Sensitivity": f"{round(sensitivity * 100, 1)}%",
             "NNE (1/PPV)": nne,
             "Brier Loss": round(brier, 4),
-            "Suction Spike (m121)": f"{suction_prob}%",
-            "Silent Crash (m305)": f"{crash_prob}%",
+            "Suction Spike (Day)": f"{suction_prob}%",
+            "Late Crash (06:05 AM)": f"{crash_prob}%",
             "prob_col": col_name
         })
 
@@ -126,6 +135,30 @@ def run_multi_model_benchmark(cohort_df: pd.DataFrame) -> tuple[pd.DataFrame, pd
 
 def render_ml_benchmark_tab(st, patient_df: pd.DataFrame, summary_df: pd.DataFrame, rf_importance_df: pd.DataFrame, selected_min: int, philips_mode: bool = False):
     current_row = patient_df.iloc[selected_min]
+    current_ts = pd.to_datetime(current_row["timestamp"])
+
+    fc = forecast_regression_trajectory(patient_df, selected_min, prob_col="prob_random", horizon_mins=120, critical_threshold=80.0)
+
+    if fc["eta_mins"] == 0:
+        st.error(
+            f"⏱️ **PREDICTIVE REGRESSION TIMING: ACTIVE THRESHOLD BREACH NOW ({fc['eta_clock']})** — "
+            f"Decompensation risk has crossed the 80% critical threshold (`{fc['current_prob']}%`)."
+        )
+    elif fc["eta_mins"] is not None:
+        st.warning(
+            f"⏳ **ESTIMATED TIME TO REGRESSION THRESHOLD (80% RISK): ~{fc['eta_mins']} MIN (BY {fc['eta_clock']})** — "
+            f"Trajectory: `{fc['trajectory_status']}` | Current Risk: `{fc['current_prob']}%`"
+        )
+    elif "UPWARD" in fc["trajectory_status"] or "COIL" in fc["trajectory_status"]:
+        st.info(
+            f"📈 **EARLY TRAJECTORY / COIL DETECTED ({fc['trajectory_status']})** — "
+            f"Projected 2h Risk: `{fc['proj_mean'][-1]}%` (below 80% critical breach within next 120 min)."
+        )
+    else:
+        st.success(
+            f"🟢 **NO REGRESSION BREACH PROJECTED IN NEXT 120 MIN** — "
+            f"Trajectory: `{fc['trajectory_status']}` | Projected 2h Risk: `{fc['proj_mean'][-1]}%`"
+        )
 
     m1, m2, m3 = st.columns(3)
     for idx, (_, m_row) in enumerate(summary_df.iterrows()):
@@ -139,7 +172,7 @@ def render_ml_benchmark_tab(st, patient_df: pd.DataFrame, summary_df: pd.DataFra
             delta_color="inverse" if prob_val >= 50.0 else "normal"
         )
 
-    window_df = patient_df.iloc[max(30, selected_min - 120):selected_min + 1]
+    window_df = patient_df.iloc[max(30, selected_min - 90):selected_min + 1]
 
     fig_prob = go.Figure()
     colors = ["#00FF66", "#00E5FF", "#FFD600"] if philips_mode else ["#10B981", "#38BDF8", "#F59E0B"]
@@ -153,13 +186,45 @@ def render_ml_benchmark_tab(st, patient_df: pd.DataFrame, summary_df: pd.DataFra
             mode="lines", name=m_row["Model Architecture"].split(" (")[0],
             line=dict(color=colors[idx % len(colors)], width=2.5)
         ))
-    fig_prob.add_hline(y=50.0, line_dash="dash", line_color=alert_line, annotation_text="50% Action Threshold")
+
+    fig_prob.add_trace(go.Scatter(
+        x=fc["future_ts"] + fc["future_ts"][::-1],
+        y=list(fc["proj_upper"]) + list(fc["proj_lower"][::-1]),
+        fill="toself",
+        fillcolor="rgba(239, 68, 68, 0.14)" if fc["eta_mins"] is not None else "rgba(56, 189, 248, 0.12)",
+        line=dict(color="rgba(255,255,255,0)"),
+        hoverinfo="skip",
+        name="±95% Forecast Cone (+2h)"
+    ))
+    fig_prob.add_trace(go.Scatter(
+        x=fc["future_ts"],
+        y=fc["proj_mean"],
+        mode="lines",
+        name="Projected Trajectory (+2h)",
+        line=dict(color="#FF2A2A" if philips_mode else "#F87171", width=2.5, dash="dot")
+    ))
+
+    fig_prob.add_vline(x=current_ts, line_dash="solid", line_color="#9CA3AF", line_width=1.5)
+    if fc["eta_mins"] is not None and fc["eta_mins"] > 0:
+        eta_ts = current_ts + pd.Timedelta(minutes=fc["eta_mins"])
+        fig_prob.add_trace(go.Scatter(
+            x=[eta_ts], y=[80.0],
+            mode="markers+text",
+            name=f"ETA Breach ({fc['eta_clock']})",
+            text=[f"ETA {fc['eta_clock']}"],
+            textposition="top center",
+            marker=dict(color="#FF2A2A", size=11, symbol="diamond")
+        ))
+
+    fig_prob.add_hline(y=80.0, line_dash="dash", line_color=alert_line, annotation_text="80% Critical Regression Threshold")
     fig_prob.update_layout(
-        title="4-Hour Forward Decompensation Probability Across ML Architectures (%)",
+        title="Observed History + 2-Hour Forward Regression Forecast (%)",
         template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=plot_bg,
-        height=260, margin=dict(l=10, r=10, t=35, b=10), yaxis=dict(range=[0, 105], title="Risk (%)")
+        dragmode="pan",
+        height=310, margin=dict(l=10, r=10, t=40, b=60), yaxis=dict(range=[0, 108], title="Risk (%)"),
+        legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5)
     )
-    st.plotly_chart(fig_prob, use_container_width=True)
+    st.plotly_chart(fig_prob, use_container_width=True, config=TOUCH_CHART_CONFIG)
 
     local_drivers = explain_minute_prediction(patient_df, rf_importance_df, selected_min).head(5)
     fig_imp = go.Figure(go.Bar(
@@ -171,9 +236,10 @@ def render_ml_benchmark_tab(st, patient_df: pd.DataFrame, summary_df: pd.DataFra
     fig_imp.update_layout(
         title="Top 5 Active Physiological Drivers at Current Shift Minute",
         template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=plot_bg,
+        dragmode="pan",
         height=230, margin=dict(l=10, r=10, t=35, b=10), xaxis_title="Local Driver Impact Score"
     )
-    st.plotly_chart(fig_imp, use_container_width=True)
+    st.plotly_chart(fig_imp, use_container_width=True, config=TOUCH_CHART_CONFIG)
 
     display_cols = [c for c in summary_df.columns if c != "prob_col"]
     st.dataframe(summary_df[display_cols], use_container_width=True, hide_index=True)
