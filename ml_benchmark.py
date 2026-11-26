@@ -156,34 +156,30 @@ def render_ml_benchmark_tab(st, patient_df: pd.DataFrame, summary_df: pd.DataFra
             }
     saved_eta = eta_store.get(pid)
 
-    # Clear, high-contrast Forecast Verdict + Simple "Why" + Persistent Predicted Time
+    why_html = why_sentence.replace("**Why:**", "<b>Why:</b>")
     if fc["eta_mins"] == 0:
         prior_note = (
-            f" *(First predicted at {saved_eta['detected_at_clock']} for ~{saved_eta['initial_eta_clock']})*"
+            f" <span style='color:#FCA5A5; font-weight:500;'>(First predicted at {saved_eta['detected_at_clock']} for ~{saved_eta['initial_eta_clock']})</span>"
             if saved_eta else ""
         )
-        st.error(
-            f"🚨 **HIGH RISK NOW ({fc['current_prob']}%) — Critical Threshold Crossed**{prior_note}\n\n"
-            f"{why_sentence}"
-        )
+        border_c, bg_c, title_html = "#EF4444", "rgba(239, 68, 68, 0.18)", f"🚨 HIGH RISK NOW ({fc['current_prob']}%) — Critical Threshold Crossed{prior_note}"
     elif fc["eta_mins"] is not None:
-        st.warning(
-            f"⏳ **ESTIMATED BREACH IN ~{fc['eta_mins']} MIN (BY {fc['eta_clock']})** — "
-            f"Risk: `{fc['current_prob']}%` ({fc['trajectory_status']})\n\n"
-            f"{why_sentence}"
-        )
+        border_c, bg_c, title_html = "#F59E0B", "rgba(245, 158, 11, 0.16)", f"⏳ ESTIMATED BREACH IN ~{fc['eta_mins']} MIN (BY {fc['eta_clock']}) • Risk: {fc['current_prob']}%"
     elif "DRIFT" in fc["trajectory_status"]:
-        st.info(
-            f"📈 **EARLY DRIFT ({fc['trajectory_status']})** — "
-            f"2h Projected Risk: `{fc['proj_mean'][-1]}%`\n\n"
-            f"{why_sentence}"
-        )
+        border_c, bg_c, title_html = "#38BDF8", "rgba(56, 189, 248, 0.15)", f"📈 EARLY DRIFT ({fc['trajectory_status']}) • 2h Projected Risk: {fc['proj_mean'][-1]}%"
     else:
-        st.success(
-            f"🟢 **LOW RISK / STABLE ({fc['current_prob']}%)** — "
-            f"No Breach Expected in Next 2 Hours\n\n"
-            f"{why_sentence}"
-        )
+        border_c, bg_c, title_html = "#10B981", "rgba(16, 185, 129, 0.14)", f"🟢 LOW RISK / STABLE ({fc['current_prob']}%) — No Breach Expected in Next 2 Hours"
+
+    st.markdown(
+        f"""
+        <div style="background-color:{bg_c}; border:1px solid #374151; border-left:5px solid {border_c};
+                    border-radius:9px; padding:12px 14px; margin-bottom:12px; color:#FFFFFF;">
+            <div style="font-weight:800; font-size:0.95rem; color:#FFFFFF;">{title_html}</div>
+            <div style="margin-top:6px; font-size:0.88rem; color:#F3F4F6;">{why_html}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     m1, m2, m3 = st.columns(3)
     for idx, (_, m_row) in enumerate(summary_df.iterrows()):
