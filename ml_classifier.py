@@ -109,7 +109,6 @@ def explain_minute_prediction(patient_df: pd.DataFrame, importance_df: pd.DataFr
 
 def build_plain_english_why(row: pd.Series, local_drivers: pd.DataFrame, fc: dict) -> str:
     """Generates a single, crystal-clear plain-English sentence explaining WHY the ML model made its forecast."""
-    # Check active clinical patterns first for intuitive bedside clarity
     reasons = []
     if float(row.get("sbp_zscore", 0)) > 2.5 and float(row.get("hr_zscore", 0)) < -1.2:
         reasons.append(f"BP spiked to {int(row['sbp_clean'])}/{int(row['dbp_clean'])} while HR dropped to {row['hr_clean']} bpm")
@@ -137,11 +136,94 @@ def build_plain_english_why(row: pd.Series, local_drivers: pd.DataFrame, fc: dic
         formatted = joined[0].upper() + joined[1:]
         return f"**Why:** {formatted} compared to this patient's 4-hour resting baseline."
 
-    # Calm / stable baseline explanation
     top_driver = local_drivers.iloc[0]["Clinical Parameter"] if not local_drivers.empty else "all vitals"
     if bool(row.get("artifact_suppressed", False)):
         return "**Why:** Brief care spike was filtered out by the 5-minute median—underlying vitals remain steady."
     return f"**Why:** All vitals (including {top_driver}) are staying close to this patient's personal 4-hour baseline."
+
+
+def _compute_single_minute_projection(
+    patient_df: pd.DataFrame,
+    smooth_probs: pd.Series,
+    minute_idx: int,
+    horizon_mins: int = 120,
+    critical_threshold: float = 80.0
+) -> dict:
+    """Computes smoothed slope and raw trajectory state for a single minute index."""
+    row = patient_df.iloc[minute_idx]
+    current_prob = float(smooth_probs.iloc[minute_idx])
+    current_ts = pd.to_datetime(row["timestamp"])
+
+    # Widen regression window to 30 minutes on 5-min median-smoothed probabilities
+    lookback = min(30, minute_idx)
+    if lookback >= 6:
+        recent_probs = smooth_probs.iloc[minute_idx - lookback:minute_idx + 1].astype(float).values
+        x_hist = np.arange(len(recent_probs))
+        prob_slope_per_min = float(np.polyfit(x_hist, recent_probs, 1)[0])
+    else:
+        prob_slope_per_min = 0.0
+
+    # Require sustained 3-minute physiological Z-strain (prevent single-minute Gaussian noise triggers)
+    start_3m = max(0, minute_idx - 2)
+    win_3m = patient_df.iloc[start_3m:minute_idx + 1]
+    z_strain_3m = float(
+        win_3m[["rr_zscore", "pip_zscore", "etco2_zscore", "sbp_zscore"]]
+        .max(axis=1)
+        .combine(
+            (-win_3m[["pip_zscore", "pulse_pressure_zscore"]]).max(axis=1),
+            max
+        )
+        .min()
+    ) if len(win_3m) >= 3 else 0.0
+
+    vel_activity = (
+        abs(float(row.get("dRR_dt_30m", 0.0))) / 2.5 +
+        abs(float(row.get("dPIP_dt_30m", 0.0))) / 2.5 +
+        abs(float(row.get("dEtCO2_dt_30m", 0.0))) / 2.5 +
+        abs(float(row.get("dSBP_dt_30m", 0.0))) / 10.0
+    )
+    squeeze_active = bool(row.get("phys_squeeze_active", False))
+
+    if z_strain_3m >= 1.6 and vel_activity >= 1.1 and prob_slope_per_min < 0.35:
+        effective_slope = max(prob_slope_per_min, 0.45 * min(z_strain_3m, 2.5))
+    elif squeeze_active and prob_slope_per_min < 0.30:
+        effective_slope = max(prob_slope_per_min, 0.42)
+    elif z_strain_3m < 1.5 and current_prob < 25.0 and not squeeze_active:
+        effective_slope = min(prob_slope_per_min, 0.0)
+    else:
+        effective_slope = prob_slope_per_min
+
+    future_steps = np.arange(0, horizon_mins + 5, 5)
+    raw_proj = current_prob + effective_slope * future_steps
+    proj_mean = np.clip(np.round(raw_proj, 1), 0.2, 99.5)
+
+    slope_per_hr = round(effective_slope * 60.0, 1)
+    is_breach_now = current_prob >= critical_threshold or bool(row.get("pre_ehr_alert", False))
+
+    cross_indices = np.where(proj_mean >= critical_threshold)[0]
+    raw_eta_mins = 0 if is_breach_now else (int(future_steps[cross_indices[0]]) if len(cross_indices) > 0 else None)
+
+    # Raw state classification before persistence & hysteresis filtering
+    if is_breach_now:
+        raw_state = "BREACH"
+    elif raw_eta_mins is not None and slope_per_hr >= 15.0:
+        raw_state = "RISING"
+    elif squeeze_active or (slope_per_hr >= 15.0 and proj_mean[-1] >= 50.0):
+        raw_state = "DRIFT"
+    else:
+        raw_state = "STABLE"
+
+    return {
+        "current_prob": round(current_prob, 1),
+        "effective_slope": effective_slope,
+        "slope_per_hr": slope_per_hr,
+        "raw_eta_mins": raw_eta_mins,
+        "raw_state": raw_state,
+        "proj_mean": proj_mean,
+        "future_steps": future_steps,
+        "current_ts": current_ts,
+        "squeeze_active": squeeze_active,
+    }
 
 
 def forecast_regression_trajectory(
@@ -151,76 +233,108 @@ def forecast_regression_trajectory(
     horizon_mins: int = 120,
     critical_threshold: float = 80.0
 ) -> dict:
-    row = patient_df.iloc[selected_min]
-    current_prob = float(row.get(prob_col, 0.0))
-    current_ts = pd.to_datetime(row["timestamp"])
-
-    lookback = min(15, selected_min)
-    if lookback >= 3:
-        recent_probs = patient_df.iloc[selected_min - lookback:selected_min + 1][prob_col].astype(float).values
-        x_hist = np.arange(len(recent_probs))
-        prob_slope_per_min = float(np.polyfit(x_hist, recent_probs, 1)[0])
-    else:
-        prob_slope_per_min = 0.0
-
-    z_strain = max(
-        0.0,
-        float(row.get("rr_zscore", 0.0)),
-        float(row.get("pip_zscore", 0.0)),
-        float(row.get("etco2_zscore", 0.0)),
-        float(row.get("sbp_zscore", 0.0)),
-        -float(row.get("pip_zscore", 0.0)),
-        -float(row.get("pulse_pressure_zscore", 0.0)),
+    """
+    Projects forward decompensation risk with:
+      1. 5-minute rolling median smoothing on risk probability
+      2. 30-minute regression lookback (eliminates 5-min Gaussian slope chatter)
+      3. 3-minute consecutive persistence latch to enter RISING/DRIFT
+      4. 5-minute asymmetric hysteresis deadband before clearing back to STABLE
+    """
+    smooth_probs = (
+        patient_df[prob_col]
+        .astype(float)
+        .rolling(window=5, min_periods=1)
+        .median()
     )
-    vel_activity = (
-        abs(float(row.get("dRR_dt_30m", 0.0))) / 2.5 +
-        abs(float(row.get("dPIP_dt_30m", 0.0))) / 2.5 +
-        abs(float(row.get("dEtCO2_dt_30m", 0.0))) / 2.5 +
-        abs(float(row.get("dSBP_dt_30m", 0.0))) / 10.0
-    )
-    squeeze_active = bool(row.get("phys_squeeze_active", False))
 
-    if z_strain >= 1.3 and vel_activity >= 0.8 and prob_slope_per_min < 0.35:
-        effective_slope = max(prob_slope_per_min, 0.45 * min(z_strain, 2.5))
-    elif squeeze_active and prob_slope_per_min < 0.30:
-        effective_slope = max(prob_slope_per_min, 0.42)
-    elif z_strain < 1.2 and current_prob < 25.0 and not squeeze_active:
-        effective_slope = min(prob_slope_per_min, 0.0)
-    else:
-        effective_slope = prob_slope_per_min
+    # Evaluate trailing 8 minutes to apply 3-min entry latch + 5-min clear hysteresis
+    eval_start = max(0, selected_min - 7)
+    history = [
+        _compute_single_minute_projection(patient_df, smooth_probs, m, horizon_mins, critical_threshold)
+        for m in range(eval_start, selected_min + 1)
+    ]
+    curr = history[-1]
 
-    future_steps = np.arange(0, horizon_mins + 5, 5)
+    # Walk forward through the trailing 8-min window to determine latched state & locked ETA
+    latched_state = "STABLE"
+    locked_eta_target_ts = None
+
+    for idx, step in enumerate(history):
+        s = step["raw_state"]
+        if s == "BREACH":
+            latched_state = "BREACH"
+            locked_eta_target_ts = step["current_ts"]
+        elif latched_state == "STABLE":
+            # Require 3 consecutive minutes of RISING/DRIFT before triggering warning
+            if idx >= 2 and all(history[k]["raw_state"] in ("RISING", "DRIFT", "BREACH") for k in range(idx - 2, idx + 1)):
+                latched_state = s
+                if step["raw_eta_mins"] is not None:
+                    locked_eta_target_ts = step["current_ts"] + pd.Timedelta(minutes=step["raw_eta_mins"])
+        else:
+            # Currently in RISING / DRIFT / BREACH: require 5 consecutive calm minutes
+            # below hysteresis floor (slope < 8%/hr and 2h proj < 35%) to clear back to STABLE
+            calm_check = [
+                (history[k]["raw_state"] == "STABLE" and history[k]["slope_per_hr"] < 8.0 and history[k]["proj_mean"][-1] < 35.0)
+                for k in range(max(0, idx - 4), idx + 1)
+            ]
+            if len(calm_check) >= 5 and all(calm_check):
+                latched_state = "STABLE"
+                locked_eta_target_ts = None
+            else:
+                if s == "RISING":
+                    latched_state = "RISING"
+                if step["raw_eta_mins"] is not None:
+                    # Smoothly update ETA target without jumping wildly
+                    new_target = step["current_ts"] + pd.Timedelta(minutes=step["raw_eta_mins"])
+                    if locked_eta_target_ts is None:
+                        locked_eta_target_ts = new_target
+                    else:
+                        # Blend 70% previous locked target + 30% new estimate for rock-solid countdown
+                        delta_sec = (new_target - locked_eta_target_ts).total_seconds()
+                        locked_eta_target_ts = locked_eta_target_ts + pd.Timedelta(seconds=0.3 * delta_sec)
+
+    current_ts = curr["current_ts"]
+    future_steps = curr["future_steps"]
     future_ts = [current_ts + pd.Timedelta(minutes=int(m)) for m in future_steps]
 
-    raw_proj = current_prob + effective_slope * future_steps
-    proj_mean = np.clip(np.round(raw_proj, 1), 0.2, 99.5)
+    # When latched in STABLE, keep projection flat so chart matches the STABLE verdict
+    if latched_state == "STABLE":
+        effective_slope = min(curr["effective_slope"], 0.0)
+        proj_mean = np.clip(np.round(curr["current_prob"] + effective_slope * future_steps, 1), 0.2, 99.5)
+    else:
+        effective_slope = max(curr["effective_slope"], 0.25)
+        proj_mean = np.clip(np.round(curr["current_prob"] + effective_slope * future_steps, 1), 0.2, 99.5)
+
     band_spread = np.sqrt(future_steps / 10.0) * 3.5
     proj_upper = np.clip(np.round(proj_mean + band_spread, 1), 0.2, 99.8)
     proj_lower = np.clip(np.round(proj_mean - band_spread, 1), 0.1, 99.0)
 
     eta_mins = None
     eta_clock = None
-    if current_prob >= critical_threshold or bool(row.get("pre_ehr_alert", False)):
+    if latched_state == "BREACH":
         eta_mins = 0
         eta_clock = current_ts.strftime("%I:%M %p")
         trajectory_status = "BREACHING NOW"
-    else:
-        cross_indices = np.where(proj_mean >= critical_threshold)[0]
-        if len(cross_indices) > 0:
-            eta_mins = int(future_steps[cross_indices[0]])
+    elif latched_state == "RISING":
+        if locked_eta_target_ts is not None:
+            eta_mins = max(5, int(round((locked_eta_target_ts - current_ts).total_seconds() / 60.0 / 5.0) * 5))
             eta_clock = (current_ts + pd.Timedelta(minutes=eta_mins)).strftime("%I:%M %p")
-            trajectory_status = f"RISING (+{round(effective_slope * 60, 1)}%/hr)"
-        elif squeeze_active or (effective_slope > 0.12 and proj_mean[-1] >= 45.0):
-            trajectory_status = f"EARLY DRIFT (+{round(effective_slope * 60, 1)}%/hr)"
         else:
-            trajectory_status = "STABLE"
+            eta_mins = curr["raw_eta_mins"] or 60
+            eta_clock = (current_ts + pd.Timedelta(minutes=eta_mins)).strftime("%I:%M %p")
+        trajectory_status = f"RISING (+{max(15.0, curr['slope_per_hr'])}%/hr)"
+    elif latched_state == "DRIFT":
+        trajectory_status = f"EARLY DRIFT (+{max(12.0, curr['slope_per_hr'])}%/hr)"
+    else:
+        trajectory_status = "STABLE"
 
     return {
-        "current_prob": round(current_prob, 1),
+        "current_prob": curr["current_prob"],
         "slope_per_hr": round(effective_slope * 60.0, 1),
         "eta_mins": eta_mins,
         "eta_clock": eta_clock,
         "trajectory_status": trajectory_status,
+        "latched_state": latched_state,
         "future_ts": future_ts,
         "proj_mean": proj_mean,
         "proj_upper": proj_upper,

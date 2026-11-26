@@ -137,20 +137,53 @@ def run_multi_model_benchmark(cohort_df: pd.DataFrame) -> tuple[pd.DataFrame, pd
 def render_ml_benchmark_tab(st, patient_df: pd.DataFrame, summary_df: pd.DataFrame, rf_importance_df: pd.DataFrame, selected_min: int, philips_mode: bool = False):
     current_row = patient_df.iloc[selected_min]
     current_ts = pd.to_datetime(current_row["timestamp"])
+    pid = str(current_row.get("patient_id", "VENT-01"))
 
     fc = forecast_regression_trajectory(patient_df, selected_min, prob_col="prob_random", horizon_mins=120, critical_threshold=80.0)
     local_drivers = explain_minute_prediction(patient_df, rf_importance_df, selected_min).head(5)
     why_sentence = build_plain_english_why(current_row, local_drivers, fc)
 
-    # Clear, scannable Forecast Verdict + Simple "Why"
+    # Persist initial predicted ETA in session_state while active so it never vanishes on the next tick
+    eta_store = st.session_state.setdefault("latched_eta_memory", {})
+    if fc["latched_state"] == "STABLE":
+        eta_store.pop(pid, None)
+    elif fc["eta_mins"] is not None and fc["eta_mins"] > 0:
+        if pid not in eta_store:
+            eta_store[pid] = {
+                "initial_eta_clock": fc["eta_clock"],
+                "initial_eta_mins": fc["eta_mins"],
+                "detected_at_clock": current_ts.strftime("%I:%M %p"),
+            }
+    saved_eta = eta_store.get(pid)
+
+    # Clear, high-contrast Forecast Verdict + Simple "Why" + Persistent Predicted Time
     if fc["eta_mins"] == 0:
-        st.error(f"🚨 **HIGH RISK NOW ({fc['current_prob']}%) — Critical Threshold Crossed**\n\n{why_sentence}")
+        prior_note = (
+            f" *(First predicted at {saved_eta['detected_at_clock']} for ~{saved_eta['initial_eta_clock']})*"
+            if saved_eta else ""
+        )
+        st.error(
+            f"🚨 **HIGH RISK NOW ({fc['current_prob']}%) — Critical Threshold Crossed**{prior_note}\n\n"
+            f"{why_sentence}"
+        )
     elif fc["eta_mins"] is not None:
-        st.warning(f"⏳ **ESTIMATED BREACH IN ~{fc['eta_mins']} MIN (BY {fc['eta_clock']})** — Risk: `{fc['current_prob']}%` ({fc['trajectory_status']})\n\n{why_sentence}")
+        st.warning(
+            f"⏳ **ESTIMATED BREACH IN ~{fc['eta_mins']} MIN (BY {fc['eta_clock']})** — "
+            f"Risk: `{fc['current_prob']}%` ({fc['trajectory_status']})\n\n"
+            f"{why_sentence}"
+        )
     elif "DRIFT" in fc["trajectory_status"]:
-        st.info(f"📈 **EARLY DRIFT ({fc['trajectory_status']})** — 2h Projected Risk: `{fc['proj_mean'][-1]}%`\n\n{why_sentence}")
+        st.info(
+            f"📈 **EARLY DRIFT ({fc['trajectory_status']})** — "
+            f"2h Projected Risk: `{fc['proj_mean'][-1]}%`\n\n"
+            f"{why_sentence}"
+        )
     else:
-        st.success(f"🟢 **LOW RISK / STABLE ({fc['current_prob']}%)** — No Breach Expected in Next 2 Hours\n\n{why_sentence}")
+        st.success(
+            f"🟢 **LOW RISK / STABLE ({fc['current_prob']}%)** — "
+            f"No Breach Expected in Next 2 Hours\n\n"
+            f"{why_sentence}"
+        )
 
     m1, m2, m3 = st.columns(3)
     for idx, (_, m_row) in enumerate(summary_df.iterrows()):

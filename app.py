@@ -65,6 +65,8 @@ if "care_logs" not in st.session_state:
     st.session_state.care_logs = {}
 for pid in PATIENT_PROFILES.keys():
     st.session_state.care_logs.setdefault(pid, [])
+if "latched_eta_memory" not in st.session_state:
+    st.session_state.latched_eta_memory = {}
 
 
 def set_patient(pid: str):
@@ -74,6 +76,7 @@ def set_patient(pid: str):
 def jump_to_minute(m: int):
     st.session_state.is_playing = False
     st.session_state.advance_tick = False
+    st.session_state.latched_eta_memory.pop(st.session_state.selected_pid, None)
     st.session_state.selected_min = int(min(max(30, m), SHIFT_MINUTES - 1))
 
 
@@ -90,6 +93,7 @@ with top_h3:
     if st.button("🔄 Reset Data", use_container_width=True):
         st.session_state.is_playing = False
         st.session_state.advance_tick = False
+        st.session_state.latched_eta_memory = {}
         generate_synthetic_telemetry(DB_NAME)
         st.cache_data.clear()
         st.rerun()
@@ -122,6 +126,23 @@ st.markdown(f"""
         background-color: #374151 !important;
         border-color: {active_border} !important;
         color: #FFFFFF !important;
+    }}
+    /* Force dark high-contrast backgrounds on st.success / st.info / st.warning / st.error boxes on mobile */
+    div[data-testid="stAlert"] {{
+        background-color: #111827 !important;
+        color: #F9FAFB !important;
+        border: 1px solid #374151 !important;
+        border-left-width: 5px !important;
+        border-radius: 8px !important;
+    }}
+    div[data-testid="stAlert"] * {{
+        color: #F9FAFB !important;
+    }}
+    /* Fix st.metric delta pill background so text is always readable on mobile */
+    div[data-testid="stMetricDelta"] > div {{
+        background-color: #1F2937 !important;
+        padding: 2px 8px !important;
+        border-radius: 999px !important;
     }}
     .bed-tile {{ background-color: {card_bg}; border: 1px solid {card_border}; border-radius: 10px; padding: 10px 12px; margin-bottom: 5px; }}
     .bed-active {{ border: 2px solid {active_border} !important; box-shadow: 0 0 12px {active_glow}; }}
@@ -180,7 +201,7 @@ for pid, meta in PATIENT_PROFILES.items():
     visible_pids.append(pid)
 
 if not visible_pids:
-    st.info("No active alerts at this time. Switch to **All 12 Beds** or tap **🚨 Late Crash (06:05 AM)**.")
+    st.info("No active alerts at this time. Switch to **All 12 Beds** or tap **🚨 Crash (06:05 AM)**.")
 else:
     for row_start in range(0, len(visible_pids), 4):
         row_pids = visible_pids[row_start:row_start + 4]
