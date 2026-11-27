@@ -143,7 +143,6 @@ def render_ml_benchmark_tab(st, patient_df: pd.DataFrame, summary_df: pd.DataFra
     local_drivers = explain_minute_prediction(patient_df, rf_importance_df, selected_min).head(5)
     why_sentence = build_plain_english_why(current_row, local_drivers, fc)
 
-    # Persist initial predicted ETA in session_state while active so it never vanishes on the next tick
     eta_store = st.session_state.setdefault("latched_eta_memory", {})
     if fc["latched_state"] == "STABLE":
         eta_store.pop(pid, None)
